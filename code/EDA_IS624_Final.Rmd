@@ -1,0 +1,272 @@
+---
+title: "Exploratory Analysis"
+author: "Aaron Palumbo"
+date: "Sunday, July 05, 2015"
+output: html_document
+---
+
+## Background Information
+
+From the data dictionary:
+>The sensor signals (accelerometer and gyroscope) were pre-processed by applying noise filters and then sampled in fixed-width sliding windows of 2.56 sec and 50% overlap (128 readings/window). The sensor acceleration signal, which has gravitational and body motion components, was separated using a Butterworth low-pass filter into body acceleration and gravity. The gravitational force is assumed to have only low frequency components, therefore a filter with 0.3 Hz cutoff frequency was used. From each window, a vector of features was obtained by calculating variables from the time and frequency domain. See 'features_info.txt' for more details. 
+
+This means that we are not dealing with time domain vectors. Each observation represents 561 measurements of a 2.56 second window. We will attempt to ascertain what activity the user was engaged in from this 2.56 second window.
+
+
+## Environment / Dependencies
+
+### Dependencies
+```{r dependencies, warning=FALSE, message=FALSE}
+library(knitr)
+# Suppress messages and warnings in all chuncks
+opts_chunk$set(message=FALSE, warning=FALSE)
+
+# Libraries
+library(caret)
+library(randomForest)
+
+# Processing
+library(doParallel)
+registerDoParallel(cores = 4)
+
+```
+
+
+### Working Directory / File Paths
+
+```{r environment}
+## Working Directory
+proj_dir <- "IS624_Final_Project"
+if(basename(getwd()) == proj_dir){
+  setwd("./code")
+}
+
+if(!(basename(getwd()) == "code")){
+  break
+}
+
+## File Paths
+dataDir <- "../data"
+trainDataDir <- file.path(dataDir, "UCI HAR Dataset", "train")
+testDataDir <- file.path(dataDir, "UCI HAR Dataset", "test")
+```
+
+### Custom Functions
+
+```{r custom_functions}
+
+```
+
+
+## Data Partitioning
+
+According to the file README.txt, the data was randomly partitioned into two sets where 70% of the volunteers were selected for generating the training data and 30% the test data. Splitting the data this way, by volunteer, is  a good idea in that we want our algorithm to be general enough to work from person to person, not just be good at identifying activities of a particular person. This would offer a good starting point for a device of this type. After it is purchased, it might make sense to tune the parameters to the specific person.
+
+
+## Load Training Data
+
+```{r train_data}
+## Sensor Data
+df.sns <- read.csv(file.path(trainDataDir, "X_train.txt"), 
+                     header=FALSE, sep="")
+snsColNums <- 1:ncol(df.sns)
+
+features <- readLines(file.path(dataDir, "UCI HAR Dataset", "features.txt"))
+
+## Subject ID
+sub <- as.factor(readLines(file.path(trainDataDir, "subject_train.txt")))
+
+## Activity ID
+act <- as.factor(readLines(file.path(trainDataDir, "y_train.txt")))
+```
+
+
+```{r test_data}
+## Sensor Data
+df.sns.test <- read.csv(file.path(testDataDir, "X_test.txt"), 
+                        header=FALSE, sep="")
+# snsColNums <- 1:ncol(df.sns)
+
+## Subject ID
+sub.test <- as.factor(readLines(file.path(testDataDir, "subject_test.txt")))
+
+## Activity ID
+act.test <- as.factor(readLines(file.path(testDataDir, "y_test.txt")))
+```
+
+
+## EDA
+
+### Sanity Checks
+
+```{r sanity_checks}
+## All sensor columns should contain numeric data
+# TRUE
+all(sapply(df.sns[1, ], class) == "numeric")
+
+## Activity vectory should be a factor
+class(act)
+
+## Subject should be a factor
+class(sub)
+
+## Counts of activities
+# Each activity is well represented
+table(act)
+
+## Counts of subjects
+# Each subject is  well represented
+table(sub)
+```
+
+### Variable Information
+
+```{r}
+## Correlated Variables
+cor.mat <- cor(df.sns)
+corFilter <- findCorrelation(cor.mat)
+
+df.sns.removeCor <- df.sns[ ,-corFilter]
+cor.mat2 <- cor(df.sns.removeCor)
+# corrplot(cor.mat2)
+```
+
+### Random Forest
+
+
+#### Feature Selection
+
+```{r}
+# use RFE from caret for feature selection
+subsets <- c(2, 9, 35, seq(120, 300, 30), 400, 561)
+# subsets <- c(2, 9)
+
+rfRFE <- list(summary=defaultSummary,
+              fit=function(x, y, first, last, ...){
+                library(randomForest)
+                randomForest(x, y, importance = first, ...)
+                },
+              pred = function(object, x) predict(object, x),
+              rank = function(object, x, y) {
+                vimp <- varImp(object)
+                vimp <- vimp[order(vimp$Overall, decreasing=TRUE),, drop=FALSE]
+                vimp$var <- rownames(vimp)
+                vimp
+                },
+              selectSize = pickSizeBest,
+              selectVar = pickVars)
+
+ctrl <- rfeControl(functions=rfFuncs,
+                   returnResamp="all",
+                   method="repeatedcv",
+                   number=10,
+                   repeats=5,
+                   verbose=FALSE,
+                   allowParallel=TRUE)
+
+# s <- sample(1:7352, 1000)
+rfProfile <- rfe(df.sns, act, sizes=subsets, rfeControl=ctrl)
+save(rfProfile, file='rfProfile')
+```
+
+```{r}
+subsets <- seq(1, 35, 5)
+subsets <- c(1)
+
+trControl <- trainControl(method="cv", number=5)
+
+nnetGrid <- expand.grid(.decay = c(0, 0.01, 0.1),
+                        .size = c(1:10),
+                        .bag = FALSE)
+
+ctrl.nn <- rfeControl(funcitons=caretFuncs,
+                   returnResamp="all",
+                   method="cv",
+                   number=5,
+                   verbose=FALSE,
+                   allowParallel=TRUE)
+
+coltouse <- rownames(vimp)[1:35]
+
+rfP.nn <- rfe(df.sns[,coltouse],  act, sizes=subsets, rfeControl=ctrl.nn,
+              trControl=trControl, tuneGrid=nnetGrid, method="avNNet",
+              preProc = c("center", "scale"), linout = TRUE,
+              trace=FALSE, MaxNWts = 371, maxit = 500)
+```
+
+
+All predictors
+
+```{r randomForest}
+if("fit.rf" %in% list.files()){
+  load("fit.rf")
+}else{
+  fit.rf <- randomForest(x=df.rf, y=act)
+  save(fit.rf, file="fit.rf")
+}
+
+```
+
+Remove correlated
+```{r}
+fit2.rf <- randomForest(act ~ ., data=cbind(df.sns.removeCor, act))
+fit2.rf <- randomForest(x=df.sns[ ,-corFilter], y=act)
+```
+
+```{r}
+fit.import <- varImp(fit.rf)
+plot(fit.import$Overall)
+fit.import.order <- order(fit.import$Overall, decreasing = TRUE)
+
+fit3.rf <- randomForest(act ~ ., data=cbind(df.imp200, act))
+```
+
+```{r}
+fitControl <- trainControl(method="repeatedcv",
+                           number=10,
+                           repeats=10)
+train.rf <- train(x=df.sns[ ,  fit.import.order[1:100]], y=act,
+                  method="rf",
+                  trControl = fitControl)
+
+```
+
+Initial experimenting shows that better performance can be achieved by reducing the number of predictors. So far the top 200 as selected by top varImp in full model is best.
+
+There seem to be some highly correlated variables as well that might reduce performance.
+
+
+
+```{r rfcv}
+if("rfcv.result" %in% list.files()){
+  load("rfcv.result")
+}else{
+  rfcv.result <- rfcv(dn.sns, act)
+  rfcv.result <- rfcv(df.sns, act, cv.fold=5, scale="log", step=0.1, recursive=TRUE)
+  save(rfcv.result, file="rfcv.result")
+}
+
+```
+
+```{r}
+result <- replicate(5, rfcv(df.sns, act, scale="log", step=0.4, recursive=TRUE), simplify=FALSE)
+error.cv <- sapply(result, "[[", "error.cv")
+error.cv
+```
+
+
+
+```{r}
+n <- 100
+p <- 40
+sigma <- 1
+set.seed(1)
+sim <- mlbench::mlbench.friedman1(n, sd = sigma)
+colnames(sim$x) <- c(paste("real", 1:5, sep = ""),
+                     paste("bogus", 1:5, sep = ""))
+bogus <- matrix(rnorm(n * p), nrow = n)
+colnames(bogus) <- paste("bogus", 5+(1:ncol(bogus)), sep = "")
+x <- cbind(sim$x, bogus)
+y <- sim$y
+```
+
