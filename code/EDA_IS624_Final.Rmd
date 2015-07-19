@@ -170,13 +170,12 @@ save(rfProfile, file='rfProfile')
 ```
 
 ```{r}
-subsets <- seq(1, 35, 5)
-subsets <- c(1)
+subsets <- seq(14, 35, 7)
 
 trControl <- trainControl(method="cv", number=5)
 
 nnetGrid <- expand.grid(.decay = c(0, 0.01, 0.1),
-                        .size = c(1:10),
+                        .size = c(5:10),
                         .bag = FALSE)
 
 ctrl.nn <- rfeControl(funcitons=caretFuncs,
