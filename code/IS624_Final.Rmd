@@ -75,7 +75,7 @@ testDataDir <- file.path(dataDir, "UCI HAR Dataset", "test")
 ```{r custom_functions}
 
 ## timing function
-time.stamp <- function(split.times=list(), label=""){
+time.stamp <- function(split.times=list(), label="", howverbose='quiet'){
   n <- length(split.times)
   current.time <- Sys.time()
   
@@ -92,6 +92,9 @@ time.stamp <- function(split.times=list(), label=""){
                                  label=label,
                                  index=n + 1)
   }
+  if (howverbose != 'quiet'){
+    print(parse.tstamp(split.times, what=howverbose))
+  }
   return(split.times)
 }
 
@@ -106,7 +109,7 @@ parse.tstamp <- function(split.times, what="all"){
 }
 
 ## Stratify based on activity and subject
-returnStratIndex <- function(activity, subject, times=1, p=0.5){
+returnStratIndex <- function(activity, subject, times=2, p=0.5){
   index <- 1:length(activity)
   indexlist <- list()
   for (s in levels(subject)){
@@ -147,15 +150,15 @@ act <- as.factor(readLines(file.path(trainDataDir, "y_train.txt")))
 
 ```{r test_data}
 ## Sensor Data
-df.sns.test <- read.csv(file.path(testDataDir, "X_test.txt"), 
-                        header=FALSE, sep="")
+df.sns.final <- read.csv(file.path(testDataDir, "X_test.txt"), 
+                         header=FALSE, sep="")
 # snsColNums <- 1:ncol(df.sns)
 
 ## Subject ID
-sub.test <- as.factor(readLines(file.path(testDataDir, "subject_test.txt")))
+sub.final <- as.factor(readLines(file.path(testDataDir, "subject_test.txt")))
 
 ## Activity ID
-act.test <- as.factor(readLines(file.path(testDataDir, "y_test.txt")))
+act.final <- as.factor(readLines(file.path(testDataDir, "y_test.txt")))
 ```
 
 ## Data Cleaning
@@ -195,76 +198,9 @@ corMatrix <- cor(df.sns)
 corFilter <- findCorrelation(corMatrix, corCutoff)
 ```
 
-We see that at a cutoff of `r corCutoff` we have `r length(corFilter)` correlated predictors. This is very high, but probably not very surprising, as many of these features have been engineered from a smaller number of sensor readings.
+We see that at a cutoff of `r corCutoff` we have `r length(corFilter)` correlated predictors. This is very high, but probably not very surprising, as many of these features have been engineered from a smaller number of sensor readings. We will test to see 
 
-#### Feature Selection
-
-There is downturn 
-
-For each model, need to evaluate performance based on test set
-
-```{r}
-timer <- time.stamp()
-# Filter observations based on stratified sample of subjects
-subFilter <- returnStratIndex(act, sub, times=2, p=0.15)
-df.train <- df.sns[subFilter[,1],]
-act.train <- act[subFilter[,1]]
-df.test <- df.sns[subFilter[,2],]
-act.test <- act[subFilter[,2]]
-
-# Remove correlated cols
-cutoff <- 0.999
-corMatrix <- cor(df.sns[subFilter, ])
-coltoremove <- findCorrelation(corMatrix, cutoff=cutoff)
-df.train <- df.train[, -coltoremove]
-
-# Vector for feature elimination
-n <- ncol(df.train)
-subsets <- as.integer(seq.log(10, n, length.out=5))
-
-# Cross validation parameters
-trControl <- trainControl(method="repeatedcv", 
-                          repeats=3, number=5)
-timer <- time.stamp(timer, "setup model parameters")
-print (parse.tstamp(timer, "last"))
-
-first = TRUE
-model.list <- list()
-df.train.i <- df.train
-for (ss in subsets[order(subsets, decreasing=TRUE)]){
-  # subset features
-  if(!first){
-    df.train.i <- df.train[,impCols[1:ss]]
-  }
-  
-  # train model
-  model.rf <- train(df.train.i, act.train,
-                    trControl=trControl,
-                    method="rf", ntrees=1000,
-                    importance=FALSE)
-#   model.list[[length(model.list) + 1]] <- list(subset=ss,
-  model.list[[as.character(ss)]] <- list(subset=ss,
-                                               model=model.rf)
-  
-  # If first time, calc varImp
-  if(first){
-    vimp <- varImp(model.rf)
-    impCols <- order(vimp$importance$Overall, decreasing=TRUE)
-    first=FALSE
-  }
-  
-  # Heartbeat
-  timer <- time.stamp(timer, paste("train", length(model.list)))
-  print(parse.tstamp(timer, "last"))
-}
-
-lapply(lapply(model.list, "[[", "model"), function(x) {x$results})
-
-df.results <- rbind(df.results, distillResults(model.list, cutoff))
-plot(df.results, col=as.factor(df.results$cutoff), pch=19)
-```
-
-```{r}
+```{r custom_model_functions}
 distillResults <- function(model.list, cutoff){
   x <- unlist(lapply(model.list, "[[", "subset"))
   y <- unlist(lapply(lapply(model.list, "[[", "model"), 
@@ -275,10 +211,27 @@ distillResults <- function(model.list, cutoff){
   return (data.frame(x=x, y=y, cutoff=cutoff))
 }
 
+testResults <- function(train.output, model.params){
+  # Extract train output
+  model.list <- train.output$model.list
+  
+  # extract model params
+  cutoff    <- model.params$cutoff
+  df.test   <- model.params$df.test
+  act.test  <- model.params$act.test
+  p         <- model.params$p
+  cvrepeats <- model.params$cvrepeats
+  
+  results.list <- lapply(model.list, 
+                         function(ml) {
+                           postResample(predict(ml$model, newdata=df.test), act.test)
+                           })
+  accuracy <- unlist(lapply(results.list, "[[", "Accuracy"))
+  numfeatures <- as.numeric(names(accuracy))
+  return (data.frame(numfeatures, accuracy, cutoff=cutoff, p=p, cvrepeats=cvrepeats))
+}
 
-```
 
-```{r}
 plotAcc <- function(df.results){
   first <- TRUE
   counter <- 1
@@ -286,25 +239,214 @@ plotAcc <- function(df.results){
   for (c in uniq.cutoffs){
     df <- df.results[df.results$cutoff == c,]
     if(first){
-      plot(df$x, df$y, 
+      plot(df$numfeatures, df$accuracy, 
            xlim=c(0, 565), ylim=c(0, 1), 
            xlab="Num Features", ylab="Accuracy",
            type='p', pch=19, col=counter)
       first <- FALSE
     } else{
-      points(df$x, df$y, type='p', pch=19, col=counter)
+      points(df$numfeatures, df$accuracy, type='p', pch=19, col=counter)
     }
     counter <- counter + 1
   }
   legend("bottomright", col=c(1:length(uniq.cutoffs)), lwd=2,
          legend=uniq.cutoffs)
 }
+
+modelSetup <- function(df.sns, act, sub, p=0.10, cutoff=0.9, cvrepeats=3){
+  # Filter observations based on stratified sample of subjects
+  subFilter <- returnStratIndex(act, sub, p=p)
+  df.train <- df.sns[subFilter[,1],]
+  act.train <- act[subFilter[,1]]
+  df.test <- df.sns[-subFilter[,1],]
+  act.test <- act[-subFilter[,1]]
+  
+  # Remove correlated cols
+  corMatrix <- cor(df.sns[subFilter[,1], ])
+  coltoremove <- findCorrelation(corMatrix, cutoff=cutoff)
+  # if there are no correlated columns do nothing
+  if(length(coltoremove) != 0){
+    df.train <- df.train[, -coltoremove]
+    df.test <- df.test[, -coltoremove]
+  }
+  
+  # Vector for feature elimination
+  n <- ncol(df.train)
+  # focus on lower number of features
+  maxUsefulFeatures <- 200
+  if (n < maxUsefulFeatures){
+    subsets <- as.integer(seq.log(10, n, length.out=5))
+  } else {
+    upperbound <- maxUsefulFeatures
+    subsets <- c(as.integer(seq.log(10, upperbound, length.out=4)), n)
+  }
+  
+  # Cross validation parameters
+  trControl <- trainControl(method="repeatedcv", 
+                            repeats=cvrepeats, number=5)
+  modelParams <- list(df.train=df.train,
+                      act.train=act.train,
+                      df.test=df.test,
+                      act.test=act.test,
+                      subsets=subsets,
+                      trControl=trControl,
+                      p=p,
+                      cutoff=cutoff,
+                      cvrepeats=cvrepeats)
+  return (modelParams)
+}
+
+trainModel <- function(model.params, timer){
+  
+  first = TRUE
+  model.list <- list()
+  
+  # Unpack Model Parameters
+  df.train  <- model.params$df.train
+  act.train <- model.params$act.train
+  df.test   <- model.params$df.test
+  act.test  <- model.params$act.test
+  subsets   <- model.params$subsets
+  trControl <- model.params$trControl
+  
+  # Train on subsets
+  df.train.i <- df.train
+  for (ss in subsets[order(subsets, decreasing=TRUE)]){
+    # subset features
+    if(!first){
+      df.train.i <- df.train[,impCols[1:ss]]
+    }
+    
+    # train model
+    model.rf <- train(df.train.i, act.train,
+                      trControl=trControl,
+                      method="rf", ntrees=1000,
+                      importance=FALSE)
+    
+    # If first time, calc varImp
+    if(first){
+      vimp <- varImp(model.rf)
+      impCols <- order(vimp$importance$Overall, decreasing=TRUE)
+      first=FALSE
+    }
+    
+    # Store model
+    model.list[[as.character(ss)]] <- list(subset=ss,
+                                           model=model.rf)
+    
+    # Heartbeat
+    timer <- time.stamp(timer, paste("train", length(model.list)), "last")
+  }
+
+  # Output
+  return (list(model.list=model.list,
+               vimp=vimp,
+               timer=timer))
+}
+
+concatResults <- function(existing=NULL, addto){
+  if(!is.null(existing)){
+    return (rbind(existing, addto))
+  }
+  return(addto)
+}
 ```
 
-```{r}
+#### Feature Selection
+
+Based on testing, the model performs better with fewer features. This is good, because the model also runs much faster with fewer features. The feature elimination procedure that produces the best result is to remove correlated columns with a cutoff of 0.95, then compute variable importance on the full model and keep
+
+For each model, need to evaluate performance based on test set
+
+
+```{r eval=FALSE}
+add_to_results_from_disk <- TRUE
+reset_results            <- FALSE   # overrides line above
+saveresults              <- TRUE    # save results to disk
+
+if (add_to_results_from_disk){
+  if ("df.results" %in% list.files()){
+    load("df.results")
+    save(df.results, file="df.results.bak")
+  } else {
+    df.results <- NULL
+  }
+}
+
+if (reset_results | !("df.results" %in% ls())){
+  df.results <- NULL
+  print("df.results = NULL")
+} else {
+  print(paste("dim(df.results) =", dim(df.results)))
+}
+
+pvals <- c(0.10, 0.25, 0.50, 0.80)
+cvals <- c(0.95, 0.90, 0.85)
+
+gridParams <- expand.grid(p=pvals, cutoff=cvals)
+
+timerOverall <- time.stamp()
+
+for (i in 1:nrow(gridParams)){
+  # unpack grid parameters
+  p <- gridParams[i, 'p']
+  cutoff <- gridParams[i, 'cutoff']
+  
+  timer <- time.stamp(howverbose="all")
+  
+  # Model setup
+  model.params <- modelSetup(df.sns, act, sub, 
+                             p=p, cutoff=cutoff, cvrepeats=3)
+  timer <- time.stamp(timer, "setup model parameters")
+  
+  # Model training
+  train.output <- trainModel(model.params, timer)
+  
+  # Measure performance on test set
+  model.output <- testResults(train.output, model.params)
+  
+  # Summarize results
+  df.results <- concatResults(df.results, model.output)
+  print
+  print ("==============================================")
+  print
+}
+
+timerOverall <- time.stamp(timerOverall, label="Total Time", howverbose="all")
+
+if(saveresults){save(df.results, file="df.results")}
+
+plot(df.results, col=as.factor(df.results$cutoff), pch=19)
 plotAcc(df.results)
 ```
 
+```{r echo=FALSE}
+load("final.results")
+
+f <- df.results$p > 0 # print all
+df <- df.results[f, ]
+
+plot(df, col=as.factor(df$cutoff), pch=19)
+```
+
+Best Model
+
+```{r}
+timer <- time.stamp()
+p = 0.5
+cutoff = 0.95
+
+# Model setup
+model.params <- modelSetup(df.sns, act, sub, 
+                           p=p, cutoff=cutoff, cvrepeats=3)
+# Model training
+train.output <- trainModel(model.params, timer)
+
+# Measure performance on test set
+model.output <- testResults(train.output, model.params)
+timer <- time.stamp(timer, "Best Model", "all")
+
+```
 
 
 #### Pre-Processing
