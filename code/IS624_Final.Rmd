@@ -121,6 +121,13 @@ returnStratIndex <- function(activity, subject, times=2, p=0.5){
   return(do.call(rbind, indexlist))
 }
 
+returnSplit <- function(subject, p=0.5){
+  index <- 1:length(subject)
+  uniquesubs <- levels(subject)
+  substokeep <- sample(uniquesubs, length(uniquesubs) * p)
+  return (index[subject %in% substokeep])
+}
+
 ```
 
 
@@ -254,15 +261,15 @@ plotAcc <- function(df.results){
 }
 
 modelSetup <- function(df.sns, act, sub, p=0.10, cutoff=0.9, cvrepeats=3){
-  # Filter observations based on stratified sample of subjects
-  subFilter <- returnStratIndex(act, sub, p=p)
-  df.train <- df.sns[subFilter[,1],]
-  act.train <- act[subFilter[,1]]
-  df.test <- df.sns[-subFilter[,1],]
-  act.test <- act[-subFilter[,1]]
+  # Split observations by subjects
+  subFilter <- returnSplit(sub, p=p)
+  df.train <- df.sns[subFilter,]
+  act.train <- act[subFilter]
+  df.test <- df.sns[-subFilter,]
+  act.test <- act[-subFilter]
   
   # Remove correlated cols
-  corMatrix <- cor(df.sns[subFilter[,1], ])
+  corMatrix <- cor(df.sns[subFilter, ])
   coltoremove <- findCorrelation(corMatrix, cutoff=cutoff)
   # if there are no correlated columns do nothing
   if(length(coltoremove) != 0){
@@ -273,7 +280,7 @@ modelSetup <- function(df.sns, act, sub, p=0.10, cutoff=0.9, cvrepeats=3){
   # Vector for feature elimination
   n <- ncol(df.train)
   # focus on lower number of features
-  maxUsefulFeatures <- 200
+  maxUsefulFeatures <- 600
   if (n < maxUsefulFeatures){
     subsets <- as.integer(seq.log(10, n, length.out=5))
   } else {
@@ -361,13 +368,13 @@ For each model, need to evaluate performance based on test set
 
 ```{r eval=FALSE}
 add_to_results_from_disk <- TRUE
-reset_results            <- FALSE   # overrides line above
-saveresults              <- TRUE    # save results to disk
+reset_results            <- FALSE    # overrides line above
+saveresults              <- TRUE     # save results to disk
 
 if (add_to_results_from_disk){
   if ("df.results" %in% list.files()){
     load("df.results")
-    save(df.results, file="df.results.bak")
+    file.copy("df.results", "df.results.bak")
   } else {
     df.results <- NULL
   }
@@ -380,18 +387,19 @@ if (reset_results | !("df.results" %in% ls())){
   print(paste("dim(df.results) =", dim(df.results)))
 }
 
-pvals <- c(0.10, 0.25, 0.50, 0.80)
-cvals <- c(0.95, 0.90, 0.85)
+pvals <- c(0.80)
+cvals <- c(0.975, 0.925, 0.95)
 
 gridParams <- expand.grid(p=pvals, cutoff=cvals)
-
-timerOverall <- time.stamp()
+all.models <- list()
 
 for (i in 1:nrow(gridParams)){
   # unpack grid parameters
   p <- gridParams[i, 'p']
   cutoff <- gridParams[i, 'cutoff']
   
+  print ("==============================================")
+  print (paste0("p = ", p, ", cutoff = ", cutoff))
   timer <- time.stamp(howverbose="all")
   
   # Model setup
@@ -407,12 +415,14 @@ for (i in 1:nrow(gridParams)){
   
   # Summarize results
   df.results <- concatResults(df.results, model.output)
-  print
   print ("==============================================")
+  print (paste0("p = ", p, ", cutoff = ", cutoff))
+  print ("----------------------------------------------")
+  print (df.results)
   print
 }
-
-timerOverall <- time.stamp(timerOverall, label="Total Time", howverbose="all")
+print ("==============================================")
+print (Sys.time())
 
 if(saveresults){save(df.results, file="df.results")}
 
